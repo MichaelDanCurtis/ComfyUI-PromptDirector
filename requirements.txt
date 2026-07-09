@@ -1,0 +1,4 @@
+# No additional runtime dependencies.
+#
+# Provider calls use Python's standard library. Image encoding uses numpy, Pillow, and torch,
+# which are already present in the target ComfyUI environment.

@@ -1,0 +1,9 @@
+[project]
+name = "comfyui-prompt-director"
+version = "0.1.0"
+description = "ComfyUI prompt policy nodes for Qwen Image Edit, Krea2, and LTX/WAN workflows."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

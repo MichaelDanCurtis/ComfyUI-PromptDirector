@@ -1,0 +1,24 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# Local ComfyUI/user secrets and generated runtime state
+user/
+credentials.json
+provider_profiles.json
+
+# Model weights should not be committed to the node-pack repo
+*.safetensors
+*.ckpt
+*.pt
+*.pth
