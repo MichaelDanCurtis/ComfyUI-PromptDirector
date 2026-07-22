@@ -45,6 +45,8 @@ def get_provider(
             api_key=api_key,
             base_url=resolved["base_url"],
             model=resolved["model"],
+            auth_style=resolved["auth_style"],
+            extra_headers=resolved["headers"],
         )
     if normalized in {"zai", "glm"}:
         resolved = _resolve_credentials(
@@ -70,7 +72,13 @@ def get_provider(
         if not base_url or not model:
             raise ProviderUnavailable("PROMPT_DIRECTOR_GLM_BASE_URL and PROMPT_DIRECTOR_GLM_MODEL must be set")
         provider_class = GlmVisionProvider if normalized == "glm" else ZaiVisionProvider
-        return provider_class(api_key=api_key, base_url=base_url, model=model)
+        return provider_class(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            auth_style=resolved["auth_style"],
+            extra_headers=resolved["headers"],
+        )
     if normalized == "kimi":
         resolved = _resolve_credentials(
             provider_name=normalized,
@@ -89,7 +97,13 @@ def get_provider(
             raise ProviderUnavailable("KIMI_API_KEY or MOONSHOT_API_KEY is not set")
         if not base_url or not model:
             raise ProviderUnavailable("PROMPT_DIRECTOR_KIMI_BASE_URL and PROMPT_DIRECTOR_KIMI_MODEL must be set")
-        return KimiVisionProvider(api_key=api_key, base_url=base_url, model=model)
+        return KimiVisionProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            auth_style=resolved["auth_style"],
+            extra_headers=resolved["headers"],
+        )
     if normalized in {"grok", "xai"}:
         resolved = _resolve_credentials(
             provider_name="grok",
@@ -113,7 +127,13 @@ def get_provider(
                 ) from exc
         if not base_url or not model:
             raise ProviderUnavailable("PROMPT_DIRECTOR_GROK_BASE_URL and PROMPT_DIRECTOR_GROK_MODEL must be set")
-        return XaiVisionProvider(api_key=api_key, base_url=base_url, model=model)
+        return XaiVisionProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            auth_style=resolved["auth_style"],
+            extra_headers=resolved["headers"],
+        )
 
     raise ProviderUnavailable(f"unknown analysis provider: {name}")
 
@@ -127,9 +147,9 @@ def _resolve_credentials(
     model_env_names: tuple[str, ...],
     default_base_url: str = "",
     default_model: str = "",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     source = _config_string(config, "credential_source") or "environment"
-    profile_credentials: dict[str, str] = {}
+    profile_credentials: dict[str, Any] = {}
 
     if source == "local_profile":
         try:
@@ -157,6 +177,15 @@ def _resolve_credentials(
             or profile_credentials.get("model", "")
             or _first_env_value(env, model_env_names)
             or default_model
+        ),
+        "auth_style": (
+            _config_string(config, "auth_style")
+            or str(profile_credentials.get("auth_style") or "bearer")
+        ),
+        "headers": (
+            dict(profile_credentials.get("headers"))
+            if isinstance(profile_credentials.get("headers"), dict)
+            else {}
         ),
     }
 

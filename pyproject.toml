@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-prompt-director"
-version = "0.1.0"
-description = "ComfyUI prompt policy nodes for Qwen Image Edit, Krea2, and LTX/WAN workflows."
+version = "0.3.0.dev0"
+description = "Model-aware prompt planning, LoRA context, reference roles, and edit evaluation for ComfyUI."
 requires-python = ">=3.10"
 dependencies = []
 

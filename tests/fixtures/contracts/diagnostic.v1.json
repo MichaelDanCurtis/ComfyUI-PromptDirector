@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "code": "lora_strength_above_max",
+  "severity": "warning",
+  "message": "clown_nose.safetensors model strength 1.3 is above the tested maximum 1.0.",
+  "subject": {
+    "asset_name": "clown_nose.safetensors",
+    "node_id": "42"
+  },
+  "evidence": {
+    "actual": 1.3,
+    "maximum": 1.0,
+    "source": "prompt_director.strength_max"
+  },
+  "advisory": true
+}

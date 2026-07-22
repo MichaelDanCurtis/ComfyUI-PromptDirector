@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/critic_result.v1.schema.json",
+  "title": "Prompt Director Critic Result v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "verdict",
+    "scores",
+    "observations",
+    "requested_changes_met",
+    "preservation_failures",
+    "unintended_changes",
+    "lora_activation",
+    "revised_prompt",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "verdict": { "type": "string" },
+    "scores": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "observations": { "type": "array", "items": { "type": "string" } },
+    "requested_changes_met": { "type": "array", "items": { "type": "string" } },
+    "preservation_failures": { "type": "array", "items": { "type": "string" } },
+    "unintended_changes": { "type": "array", "items": { "type": "string" } },
+    "lora_activation": { "type": "array", "items": { "type": "string" } },
+    "revised_prompt": { "type": "string" },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "diagnostics": { "type": "array", "items": { "$ref": "diagnostic.v1.schema.json" } }
+  },
+  "additionalProperties": true
+}

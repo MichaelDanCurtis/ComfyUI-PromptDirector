@@ -4,22 +4,14 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-
-QWEN_EDIT_POLICY = """QWEN IMAGE EDIT POLICY:
-Create exactly one main person unless the user explicitly asks for more.
-Do not add extra people, selfie companions, duplicate bodies, crowds, signs, placards, captions, text, writing, logos, or watermarks.
-Empty hands unless the user specifically asks for an object.
-Preserve the source/reference identity, body proportions, pose intent, and camera framing.
-Use reference images as appearance guidance only; do not insert them as additional subjects."""
-
-KREA2_POLICY = """KREA2 PROMPT POLICY:
-Describe the intended scene composition, subject placement, lighting, material detail, and realism/style target.
-Favor clear spatial layout and visual specificity.
-Avoid strict edit-locking language unless the prompt is explicitly image-edit driven."""
-
-VIDEO_POLICY = """VIDEO PROMPT POLICY:
-Describe temporal motion, camera movement, frame continuity, and identity continuity.
-Keep the subject consistent across frames and avoid unnecessary identity, wardrobe, or scene changes."""
+from .edit_plan import build_edit_plan, compile_edit_plan
+from .model_policies import (
+    KREA2_POLICY,
+    QWEN_EDIT_POLICY,
+    VIDEO_POLICY,
+    mode_hint,
+    policy_for_model,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +19,7 @@ class PromptDirectorResult:
     final_prompt: str
     analysis_json: str
     warnings: list[str]
+    edit_plan_json: str
 
 
 def build_prompt_director_result(
@@ -36,26 +29,34 @@ def build_prompt_director_result(
     mode: str = "edit",
     global_rules: str | None = None,
     extra_warnings: list[str] | None = None,
+    context: dict[str, Any] | None = None,
+    references: list[dict[str, Any]] | None = None,
+    mask_info: dict[str, Any] | None = None,
+    provider_plan: dict[str, Any] | None = None,
 ) -> PromptDirectorResult:
     analysis, warnings = _parse_analysis(analysis_json)
     warnings.extend(_warnings_from_analysis(analysis))
     warnings.extend(extra_warnings or [])
 
-    policy = _policy_for_model(model_target)
-    final_prompt = _join_prompt_parts(
-        [
-            global_rules,
-            policy,
-            _mode_hint(mode),
-            "USER INTENT:",
-            (base_prompt or "").strip(),
-        ]
+    plan = build_edit_plan(
+        base_prompt=base_prompt,
+        model_target=model_target,
+        analysis=analysis,
+        context=context,
+        references=references,
+        mask_info=mask_info,
+        global_rules=global_rules or "",
+        mode=mode,
+        provider_plan=provider_plan,
     )
+    warnings.extend(plan.get("warnings", []))
+    final_prompt = compile_edit_plan(plan)
 
     return PromptDirectorResult(
         final_prompt=final_prompt,
         analysis_json=json.dumps(analysis, ensure_ascii=True),
         warnings=_dedupe(warnings),
+        edit_plan_json=json.dumps(plan, ensure_ascii=True),
     )
 
 
@@ -96,23 +97,11 @@ def _warnings_from_analysis(analysis: dict[str, Any]) -> list[str]:
 
 
 def _policy_for_model(model_target: str) -> str:
-    normalized = (model_target or "").strip().lower().replace("-", "_")
-    if normalized in {"qwen", "qwen_edit", "qwen_image_edit", "qwen_image_edit_2511"}:
-        return QWEN_EDIT_POLICY
-    if normalized in {"krea", "krea2", "krea2t"}:
-        return KREA2_POLICY
-    if normalized in {"ltx", "wan", "video", "ltx_wan"}:
-        return VIDEO_POLICY
-    return QWEN_EDIT_POLICY
+    return policy_for_model(model_target)
 
 
 def _mode_hint(mode: str) -> str:
-    normalized = (mode or "").strip().lower()
-    if normalized == "generate":
-        return "MODE: generation prompt; describe the desired final image directly."
-    if normalized == "video":
-        return "MODE: video prompt; preserve continuity across frames."
-    return "MODE: image edit prompt; describe only the intended change and preservation constraints."
+    return mode_hint(mode)
 
 
 def _join_prompt_parts(parts: list[str | None]) -> str:

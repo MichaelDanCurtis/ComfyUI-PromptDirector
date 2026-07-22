@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "verdict": "revise",
+  "scores": {
+    "intent": 0.8,
+    "preservation": 0.55,
+    "identity": 0.9,
+    "composition": 0.6,
+    "overall": 0.7
+  },
+  "observations": ["The jacket is red, but the background composition shifted."],
+  "requested_changes_met": ["The jacket color changed to red."],
+  "preservation_failures": ["The waterfall framing changed."],
+  "unintended_changes": ["The crop became tighter."],
+  "lora_activation": [],
+  "revised_prompt": "Make only the jacket red and preserve the exact original crop and waterfall framing.",
+  "warnings": [],
+  "diagnostics": []
+}

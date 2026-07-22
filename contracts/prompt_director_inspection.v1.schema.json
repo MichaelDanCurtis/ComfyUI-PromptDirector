@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/prompt_director_inspection.v1.schema.json",
+  "title": "Prompt Director Runtime Inspection v1",
+  "type": "object",
+  "required": ["schema_version", "inspections"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "module_id": { "type": "string" },
+    "module_version": { "type": "string" },
+    "inspections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["node_id", "kind", "updated_at", "payload"],
+        "properties": {
+          "node_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "updated_at": { "type": "string" },
+          "payload": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

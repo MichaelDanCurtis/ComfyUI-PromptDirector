@@ -3,11 +3,16 @@ import unittest
 
 from nodes import (
     NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
     PromptDirector,
+    PromptDirectorAuto,
     PromptDirectorConfig,
+    PromptDirectorContext,
     PromptDirectorDebugPreview,
     PromptDirectorImageDescribe,
     PromptDirectorPromptEnhancer,
+    PromptDirectorReference,
+    PromptDirectorResultCritic,
     PromptProducer,
 )
 
@@ -20,6 +25,10 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
         self.assertIn("PromptDirectorImageDescribe", NODE_CLASS_MAPPINGS)
         self.assertIn("PromptDirectorPromptEnhancer", NODE_CLASS_MAPPINGS)
         self.assertIn("PromptProducer", NODE_CLASS_MAPPINGS)
+        self.assertIn("PromptDirectorContext", NODE_CLASS_MAPPINGS)
+        self.assertIn("PromptDirectorReference", NODE_CLASS_MAPPINGS)
+        self.assertIn("PromptDirectorAuto", NODE_CLASS_MAPPINGS)
+        self.assertIn("PromptDirectorResultCritic", NODE_CLASS_MAPPINGS)
         self.assertIn("base_prompt", inputs["required"])
         self.assertIn("model_target", inputs["required"])
         self.assertIn("analysis_json", inputs["optional"])
@@ -34,15 +43,20 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
         providers = config_inputs["required"]["analysis_provider"][0]
         self.assertIn("glm", providers)
         self.assertIn("grok", providers)
-        self.assertEqual(PromptDirector.RETURN_TYPES, ("STRING", "STRING", "STRING"))
-        self.assertEqual(PromptDirector.RETURN_NAMES, ("final_prompt", "analysis_json", "warnings"))
+        self.assertEqual(PromptDirector.RETURN_TYPES[:3], ("STRING", "STRING", "STRING"))
+        self.assertEqual(PromptDirector.RETURN_NAMES[:3], ("final_prompt", "analysis_json", "warnings"))
+        self.assertEqual(PromptDirector.RETURN_NAMES[3], "edit_plan_json")
 
     def test_nodes_use_single_flat_prompt_director_menu_category(self):
         node_classes = [
             PromptDirector,
+            PromptDirectorAuto,
             PromptDirectorConfig,
+            PromptDirectorContext,
             PromptDirectorImageDescribe,
             PromptDirectorPromptEnhancer,
+            PromptDirectorReference,
+            PromptDirectorResultCritic,
             PromptProducer,
             PromptDirectorDebugPreview,
         ]
@@ -50,6 +64,27 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
         for node_class in node_classes:
             self.assertEqual(node_class.CATEGORY, "Prompt Director")
             self.assertNotIn("/", node_class.CATEGORY)
+
+    def test_node_menu_preserves_prompt_director_names(self):
+        expected = {
+            "PromptDirector": "Prompt Director",
+            "PromptDirectorContext": "Prompt Director Context",
+            "PromptDirectorReference": "Prompt Director Reference",
+            "PromptDirectorAuto": "Prompt Director Auto",
+            "PromptDirectorResultCritic": "Prompt Director Result Critic",
+            "PromptDirectorConfig": "Prompt Director Config",
+            "PromptDirectorImageDescribe": "Prompt Image Describe",
+            "PromptDirectorPromptEnhancer": "Prompt Enhancer",
+            "PromptProducer": "Prompt Producer",
+            "PromptDirectorDebugPreview": "Prompt Director Debug Preview",
+        }
+
+        self.assertEqual(NODE_DISPLAY_NAME_MAPPINGS, expected)
+        self.assertEqual(list(NODE_DISPLAY_NAME_MAPPINGS), list(expected))
+        self.assertEqual(list(NODE_CLASS_MAPPINGS), list(expected))
+        for display_name in expected.values():
+            self.assertTrue(display_name.isascii())
+            self.assertNotIn("_", display_name)
 
     def test_config_node_returns_local_profile_settings_without_secret_values(self):
         node = PromptDirectorConfig()
@@ -132,6 +167,26 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
                 2200,
                 ["LoRA metadata", "Recommended wiring", "Trigger tokens"],
             ),
+            (
+                PromptDirectorContext,
+                1100,
+                ["canonical metadata", "LoRA stack", "Warnings"],
+            ),
+            (
+                PromptDirectorReference,
+                650,
+                ["reference image", "Reference roles", "semantic role"],
+            ),
+            (
+                PromptDirectorAuto,
+                1700,
+                ["complete Prompt Director", "Recommended wiring", "runtime"],
+            ),
+            (
+                PromptDirectorResultCritic,
+                1000,
+                ["source image", "structured verdict", "runtime inspection"],
+            ),
         ]
 
         for node_cls, minimum_description_length, required_phrases in support_nodes:
@@ -164,7 +219,7 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
     def test_node_run_returns_final_prompt_analysis_and_warnings_strings(self):
         node = PromptDirector()
 
-        final_prompt, analysis_json, warnings = node.run(
+        final_prompt, analysis_json, warnings, edit_plan_json = node.run(
             base_prompt="Remove the logo from the shirt.",
             model_target="qwen_edit",
             analysis_json='{"visible_text": true}',
@@ -174,6 +229,7 @@ class PromptDirectorNodeContractTests(unittest.TestCase):
         self.assertIn("QWEN IMAGE EDIT POLICY", final_prompt)
         self.assertTrue(json.loads(analysis_json)["visible_text"])
         self.assertIn("text_artifacts", warnings)
+        self.assertEqual(json.loads(edit_plan_json)["target_model"], "qwen_edit")
 
 
 if __name__ == "__main__":

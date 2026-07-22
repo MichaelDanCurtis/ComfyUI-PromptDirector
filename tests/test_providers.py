@@ -312,6 +312,99 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("give her a funny nose", payload_text)
         self.assertIn("clownnose", payload_text)
 
+    def test_profile_auth_style_and_headers_are_applied_without_entering_public_config(self):
+        calls = []
+
+        def fake_http_post(url, headers, payload, timeout):
+            calls.append({"url": url, "headers": headers})
+            return {"choices": [{"message": {"content": '{"description":"ok","analysis":{},"warnings":[]}'}}]}
+
+        provider = OpenAICompatibleVisionProvider(
+            api_key="custom-secret",
+            base_url="https://example.test/v1",
+            model="vision-model",
+            http_post=fake_http_post,
+            auth_style="header:X-Provider-Key",
+            extra_headers={"X-Route": "vision"},
+        )
+
+        provider.describe_image("data:image/png;base64,abc")
+
+        self.assertEqual(calls[0]["headers"]["X-Provider-Key"], "custom-secret")
+        self.assertEqual(calls[0]["headers"]["X-Route"], "vision")
+        self.assertNotIn("Authorization", calls[0]["headers"])
+        self.assertNotIn("custom-secret", json.dumps(provider.public_config()))
+
+    def test_provider_errors_redact_query_keys_and_static_header_values(self):
+        def failing_http_post(url, headers, payload, timeout):
+            raise RuntimeError(f"request failed at {url} with route {headers.get('X-Route')}")
+
+        provider = OpenAICompatibleVisionProvider(
+            api_key="query-secret",
+            base_url="https://example.test/v1",
+            model="vision-model",
+            http_post=failing_http_post,
+            auth_style="query:key",
+            extra_headers={"X-Route": "private-route"},
+        )
+
+        with self.assertRaises(RuntimeError) as caught:
+            provider.describe_image("data:image/png;base64,abc")
+
+        self.assertNotIn("query-secret", str(caught.exception))
+        self.assertNotIn("private-route", str(caught.exception))
+        self.assertIn("[redacted]", str(caught.exception))
+
+    def test_openai_compatible_provider_creates_plan_and_critiques_two_images(self):
+        calls = []
+
+        def fake_http_post(url, headers, payload, timeout):
+            calls.append(payload)
+            if "compare a source image" in payload["messages"][0]["content"].lower():
+                content = json.dumps(
+                    {
+                        "verdict": "needs_revision",
+                        "scores": {"intent": 0.9, "overall": 0.7},
+                        "unintended_changes": ["background"],
+                        "revised_prompt": "Preserve the background exactly.",
+                    }
+                )
+            else:
+                content = json.dumps(
+                    {
+                        "changes": ["Change the jacket to red."],
+                        "preserve": ["Preserve identity."],
+                        "negative_constraints": ["no text"],
+                    }
+                )
+            return {"choices": [{"message": {"content": content}}]}
+
+        provider = OpenAICompatibleVisionProvider(
+            api_key="secret-key",
+            base_url="https://example.test/v1",
+            model="vision-model",
+            http_post=fake_http_post,
+        )
+
+        plan = provider.create_edit_plan(
+            base_prompt="make jacket red",
+            model_target="qwen_edit",
+            analysis={"main_subject": "person"},
+        )
+        critique = provider.critique_result(
+            source_image_data_uri="source-uri",
+            result_image_data_uri="result-uri",
+            user_intent="make jacket red",
+            edit_plan=plan,
+        )
+
+        self.assertEqual(plan["changes"], ["Change the jacket to red."])
+        self.assertEqual(critique["verdict"], "needs_revision")
+        self.assertEqual(critique["scores"]["overall"], 0.7)
+        critique_content = calls[1]["messages"][1]["content"]
+        self.assertEqual(critique_content[1]["image_url"]["url"], "source-uri")
+        self.assertEqual(critique_content[3]["image_url"]["url"], "result-uri")
+
     def test_grok_provider_sends_responses_payload_and_parses_analysis(self):
         calls = []
 
