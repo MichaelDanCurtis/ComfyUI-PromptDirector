@@ -4,26 +4,55 @@ import json
 
 try:
     from .prompt_director.analysis import merge_analysis
+    from .prompt_director.diagnostics import diagnostics_from_warnings, merge_diagnostics
+    from .prompt_director.edit_plan import mask_summary, public_references
     from .prompt_director.image_utils import image_to_png_data_uri
+    from .prompt_director.inspection import record_inspection
     from .prompt_director.lora_metadata import (
         get_lora_names,
         load_lora_prompt_metadata,
         parse_lora_metadata_json,
         summarize_lora_metadata,
     )
+    from .prompt_director.model_context import load_prompt_context, public_context
+    from .prompt_director.model_policies import normalize_model_target
     from .prompt_director.policy import build_prompt_director_result
     from .prompt_director.providers import ProviderUnavailable, get_provider
 except ImportError:
     from prompt_director.analysis import merge_analysis
+    from prompt_director.diagnostics import diagnostics_from_warnings, merge_diagnostics
+    from prompt_director.edit_plan import mask_summary, public_references
     from prompt_director.image_utils import image_to_png_data_uri
+    from prompt_director.inspection import record_inspection
     from prompt_director.lora_metadata import (
         get_lora_names,
         load_lora_prompt_metadata,
         parse_lora_metadata_json,
         summarize_lora_metadata,
     )
+    from prompt_director.model_context import load_prompt_context, public_context
+    from prompt_director.model_policies import normalize_model_target
     from prompt_director.policy import build_prompt_director_result
     from prompt_director.providers import ProviderUnavailable, get_provider
+
+
+MODEL_TARGETS = ["auto", "qwen_edit", "qwen_image", "krea2", "ltx", "wan", "flux", "sdxl", "z_image"]
+MODEL_CATEGORIES = ["diffusion_models", "checkpoints", "unet", "style_models"]
+
+
+def get_model_assets() -> list[str]:
+    try:
+        import folder_paths  # type: ignore
+
+        assets = []
+        for category in MODEL_CATEGORIES:
+            try:
+                assets.extend(f"{category}/{name}" for name in folder_paths.get_filename_list(category))
+            except Exception:
+                continue
+        return ["none"] + sorted(set(assets), key=str.lower)
+    except Exception:
+        return ["none"]
 
 
 PROMPT_DIRECTOR_DESCRIPTION = """
@@ -40,8 +69,10 @@ know exactly what Qwen is receiving.
 What it does:
 1. Receives a human base prompt, model target, optional image-analysis JSON, optional global
    rules, and optionally a source/reference image plus provider config.
-2. Applies model-specific prompt policy for Qwen Image Edit, Krea2, LTX, or WAN.
-3. Returns three plain strings: final_prompt, normalized analysis_json, and warnings.
+2. Builds a structured change/preserve plan from analysis, Model Explorer context, LoRA metadata,
+   role-labeled references, optional mask scope, and global rules.
+3. Deterministically compiles model policy for Qwen Image Edit, Qwen Image, Krea2, Flux, SDXL,
+   Z-Image, LTX, or WAN and returns final_prompt, analysis_json, warnings, and edit_plan_json.
 4. Keeps the model-facing language deterministic, so repeated runs with the same inputs produce
    the same prompt text when provider analysis is disabled.
 5. Converts provider or manual analysis into compact policy hints without forcing the render to
@@ -63,9 +94,9 @@ base_prompt is the user's direct edit request. Keep it short and literal: "remov
 the shirt", "make the jacket red", "replace the background with a clean studio wall". Put durable
 workflow rules in global_rules instead of repeating them in every base prompt.
 
-model_target selects the policy family. qwen_edit is strict about edit preservation and artifact
-avoidance. krea2 is broader and more generative. ltx and wan are video-oriented targets that add
-motion, frame continuity, and temporal identity language.
+model_target selects the policy family. auto resolves from a connected Prompt Director Context node.
+qwen_edit is strict about edit preservation and artifact avoidance. Image-generation targets are
+broader and compositional. ltx and wan add motion, frame continuity, and temporal identity language.
 
 mode is a coarse intent flag. edit is the normal value for Qwen Image Edit. generate is useful
 when the text goes to an image-generation model instead of an edit model. video is for text
@@ -73,7 +104,7 @@ consumers where motion and continuity matter more than pixel-level source preser
 
 analysis_json lets another node, a manual note, or a provider describe what is visible in the
 image. It must be a JSON object when provided. Useful keys include subject_count, main_subject,
-visible_text, objects_in_hands, risks, style_notes, composition_notes, and preservation_notes.
+identity_notes, pose_notes, scene_notes, visible_text, objects_in_hands, and risks.
 Invalid JSON does not stop the graph; it becomes an empty object and adds invalid_analysis_json
 to warnings so the failure is visible.
 
@@ -101,6 +132,10 @@ warnings is a JSON array string. Typical warning values include extra_people, te
 object_in_hands, invalid_analysis_json, provider_requires_image, provider_unavailable, and any
 explicit risks carried in analysis_json. Route it to a text viewer when debugging prompt behavior.
 
+edit_plan_json is the structured contract used to compile final_prompt. It exposes requested changes,
+preservation constraints, source context, reference roles, mask scope, LoRA triggers and guidance,
+model guidance, negative constraints, global rules, and warnings for users and Comfy MCP.
+
 Qwen policy:
 The qwen_edit target adds strict edit language for common Qwen Image Edit failure modes: extra
 people, duplicated bodies, reference images becoming additional subjects, signs, captions,
@@ -125,7 +160,8 @@ What to verify:
 3. The text encoder's old widget prompt is no longer the source of truth.
 4. warnings is empty or contains expected, explainable values.
 5. analysis_json reflects the connected analysis source instead of stale copied JSON.
-6. The workflow JSON does not contain provider API keys.
+6. edit_plan_json contains the intended change/preserve split and expected LoRA triggers.
+7. The workflow JSON does not contain provider API keys.
 
 Troubleshooting:
 If edits still add people, check subject_count and risks in analysis_json, then add a direct
@@ -146,8 +182,8 @@ in the ComfyUI user folder. When a provider is unavailable or misconfigured, the
 deterministic prompt policy and adds a warning such as provider_unavailable or provider_requires_image.
 
 Limitations:
-Provider-backed image inspection requires a connected image, provider config, and environment
-variables. Without those, Prompt Director still works from base_prompt and analysis_json. Z.ai
+Provider-backed image inspection requires a connected image, provider config, and local-profile or
+environment credentials. Without those, Prompt Director still works from base_prompt and analysis_json. Z.ai
 and Kimi endpoint/model settings can be supplied from Prompt Director Config, a local profile, or
 environment variables because those service settings vary by account and deployment. This node is a
 prompt-policy and audit node; it does not replace the sampler, model loader, LoRA loader, or Qwen text
@@ -182,13 +218,13 @@ class PromptDirector:
                     },
                 ),
                 "model_target": (
-                    ["qwen_edit", "krea2", "ltx", "wan"],
+                    MODEL_TARGETS,
                     {
                         "default": "qwen_edit",
                         "tooltip": (
-                            "Selects the prompt policy family. qwen_edit adds strict Qwen Image Edit preservation "
-                            "and artifact-avoidance language; krea2 favors composition and realism; ltx and wan "
-                            "emphasize motion, continuity, and video prompt readability."
+                            "Selects the prompt compiler family. Choose auto when a Prompt Director Context input "
+                            "contains Model Explorer model_card metadata; otherwise select the exact family. qwen_edit "
+                            "adds strict preservation language, while generation and video families receive their own policy."
                         ),
                     },
                 ),
@@ -249,15 +285,47 @@ class PromptDirector:
                         ),
                     },
                 ),
+                "context": (
+                    "PROMPT_DIRECTOR_CONTEXT",
+                    {
+                        "tooltip": (
+                            "Optional typed details from Prompt Director Context. It carries the selected model's canonical "
+                            "Model Explorer model_card and prompt_director namespaces plus the complete LoRA stack, actual "
+                            "strengths, required triggers, compatibility decisions, and warnings into deterministic compilation."
+                        ),
+                    },
+                ),
+                "reference_set": (
+                    "PROMPT_DIRECTOR_REFERENCE_SET",
+                    {
+                        "tooltip": (
+                            "Optional chain of role-labeled images from Prompt Director Reference. Roles such as "
+                            "identity, wardrobe, pose, style, object, and background are compiled explicitly so Qwen does not "
+                            "mistake a reference person or product for another subject that should be inserted into the result."
+                        ),
+                    },
+                ),
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": (
+                            "Optional edit mask. Prompt Director measures its coverage and adds a strict instruction to apply "
+                            "the requested change only inside the mask while preserving all content outside it. The mask must "
+                            "still be connected to the actual inpaint or edit path; this input controls prompt policy only."
+                        ),
+                    },
+                ),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("final_prompt", "analysis_json", "warnings")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("final_prompt", "analysis_json", "warnings", "edit_plan_json")
     OUTPUT_TOOLTIPS = (
         "The exact model-facing prompt string that should feed the text encoder. Route this through a text viewer before TextEncodeQwenImageEditPlus so the workflow visibly proves which prompt Qwen receives.",
         "Normalized analysis JSON after merging manual analysis and optional provider analysis. Invalid or missing JSON becomes an empty object so the graph keeps running while warnings explain the issue.",
         "JSON array string of policy and provider warnings such as extra_people, text_artifacts, provider_requires_image, provider_unavailable, or invalid_analysis_json; route to a viewer during debugging.",
+        "The normalized structured edit plan used by the deterministic compiler, including requested changes, preservation constraints, source context, reference roles, mask scope, LoRA triggers, model guidance, and negative constraints for inspection or MCP advice.",
     )
     FUNCTION = "run"
     CATEGORY = "Prompt Director"
@@ -271,17 +339,25 @@ class PromptDirector:
         global_rules: str = "",
         image=None,
         config=None,
+        context=None,
+        reference_set=None,
+        mask=None,
+        unique_id=None,
     ):
         provider_analysis = {}
         provider_warnings = []
+        provider_public = {}
+        target = model_target if model_target != "auto" else str((context or {}).get("target_model") or "qwen_edit")
 
         if config and image is not None and config.get("analysis_provider", "none") != "none":
             try:
                 provider = get_provider(config.get("analysis_provider", "none"), config=config)
+                if config.get("debug"):
+                    provider_public = provider.public_config()
                 provider_analysis = provider.analyze_image(
                     image_data_uri=image_to_png_data_uri(image),
                     base_prompt=base_prompt,
-                    model_target=model_target,
+                    model_target=target,
                 )
             except ProviderUnavailable as exc:
                 provider_warnings.append(f"provider_unavailable:{exc}")
@@ -293,16 +369,555 @@ class PromptDirector:
         merged_analysis, merge_warnings = merge_analysis(analysis_json, provider_analysis)
         result = build_prompt_director_result(
             base_prompt=base_prompt,
-            model_target=model_target,
+            model_target=target,
             analysis_json=json.dumps(merged_analysis, ensure_ascii=True),
             mode=mode,
             global_rules=global_rules,
-            extra_warnings=provider_warnings + merge_warnings,
+            extra_warnings=provider_warnings + merge_warnings + list((context or {}).get("warnings", [])),
+            context=context or {},
+            references=public_references(reference_set),
+            mask_info=mask_summary(mask),
         )
-        return (
+        outputs = (
             result.final_prompt,
             result.analysis_json,
             json.dumps(result.warnings, ensure_ascii=True),
+            result.edit_plan_json,
+        )
+        record_inspection(
+            unique_id,
+            "prompt_director",
+            {
+                "final_prompt": result.final_prompt,
+                "analysis": json.loads(result.analysis_json),
+                "edit_plan": json.loads(result.edit_plan_json),
+                "context": public_context(context),
+                "warnings": result.warnings,
+                "provider": provider_public,
+            },
+        )
+        return outputs
+
+
+class PromptDirectorContext:
+    DESCRIPTION = """
+Build model-aware prompt context from the canonical metadata embedded by ComfyUI Model Explorer.
+
+The selected safetensors file is read directly. Prompt Director consumes the complete model_card namespace,
+the complete prompt_director namespace, and read-only ModelSpec identity fields. For a LoRA stack, provide a
+JSON array of objects with name, strength_model, and strength_clip. Every LoRA is resolved from ComfyUI's LoRA
+folders and checked against the selected model family, compatible families, specific base models, and tested
+strength range. Family-specific weight overrides take precedence over global guidance for the resolved target,
+while required trigger tokens and preservation guidance are carried forward automatically.
+
+Example LoRA stack JSON:
+[{"name":"clown_nose.safetensors","strength_model":0.8,"strength_clip":0.8}]
+
+Use model_target = auto to let the embedded model metadata select qwen_edit, qwen_image, Krea2, LTX, WAN,
+Flux, SDXL, or Z-Image policy. The output is typed so Prompt Director, Prompt Producer, Prompt Enhancer, and
+Prompt Director Auto can share exactly the same resolved facts instead of repeating filename selectors.
+
+Warnings and diagnostics:
+The context records how auto selected the target, the evidence behind each compatibility decision, resolved
+strength guidance, structured diagnostics, and the original warning strings. An incompatible LoRA or out-of-range
+strength is never silently changed; Prompt Director reports the issue so the user or Comfy MCP can offer a
+correction and preserve user control over model loading. An explicit model_target always remains authoritative.
+""".strip()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model_asset": (
+                    get_model_assets(),
+                    {
+                        "default": "none",
+                        "tooltip": (
+                            "Safetensors model whose embedded Model Explorer metadata should define prompt context. "
+                            "Entries are shown as ComfyUI category/filename so diffusion models, checkpoints, UNets, "
+                            "and style models can use the same canonical model_card contract without filesystem paths."
+                        ),
+                    },
+                ),
+                "model_target": (
+                    MODEL_TARGETS,
+                    {
+                        "default": "auto",
+                        "tooltip": (
+                            "Use auto to infer the compiler from model_card.model_family, compatible_families, base_model, "
+                            "architecture, ModelSpec architecture, and filename in that order. Choose an explicit target only "
+                            "when metadata is absent or when intentionally testing a model under another prompt policy."
+                        ),
+                    },
+                ),
+                "lora_stack_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "[]",
+                        "tooltip": (
+                            "JSON array describing every LoRA actually loaded in the workflow. Each entry needs name and may "
+                            "include strength_model and strength_clip. Prompt Director reads both model_card and prompt_director "
+                            "metadata for each file, validates compatibility and strengths, and aggregates exact trigger tokens."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "context_json": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Optional complete context object supplied by Model Explorer, Comfy MCP, another manager, or a saved "
+                            "automation. When present it takes precedence over local selectors while preserving unknown additive "
+                            "metadata fields, making the context contract forward-compatible across related ComfyUI products."
+                        ),
+                    },
+                ),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("PROMPT_DIRECTOR_CONTEXT", "STRING", "STRING")
+    RETURN_NAMES = ("context", "context_json", "warnings")
+    OUTPUT_TOOLTIPS = (
+        "Typed model and LoRA context for Prompt Director nodes. It contains canonical embedded metadata, target-resolution source/confidence, actual LoRA strengths, family-specific guidance, compatibility evidence, required triggers, legacy warnings, and structured diagnostics without carrying model tensors or credentials.",
+        "JSON-safe model_context.v1 payload for viewers, workflow diagnostics, versioned runtime inspection, or exchange with another product. Unknown additive fields are preserved for forward compatibility.",
+        "JSON array of metadata lookup, unknown-family, incompatible-LoRA, invalid-stack, and strength-range warnings. Values are observations only; this node never changes the model or LoRA loader settings automatically.",
+    )
+    FUNCTION = "run"
+    CATEGORY = "Prompt Director"
+
+    def run(self, model_asset="none", model_target="auto", lora_stack_json="[]", context_json="", unique_id=None):
+        category = "diffusion_models"
+        name = ""
+        if model_asset and model_asset != "none" and "/" in model_asset:
+            category, name = model_asset.split("/", 1)
+        context, warnings = load_prompt_context(
+            model_category=category,
+            model_name=name,
+            lora_stack_json=lora_stack_json,
+            context_json=context_json,
+            model_target=model_target,
+        )
+        public = public_context(context)
+        record_inspection(unique_id, "prompt_director_context", {"context": public, "warnings": warnings})
+        return (context, json.dumps(public, ensure_ascii=True), json.dumps(warnings, ensure_ascii=True))
+
+
+class PromptDirectorReference:
+    DESCRIPTION = """
+Assign one explicit role to a reference image and chain it into a Prompt Director reference set.
+
+Reference roles prevent a common image-edit failure: an identity, clothing, pose, product, or style reference is
+mistaken for another subject that should appear in the output. Chain multiple instances through previous_references.
+Prompt Director Auto can ask the configured vision provider to describe each reference, then the deterministic
+compiler states exactly how each image may influence the edit.
+
+The node does not blend images, apply IP-Adapter weights, or alter Qwen's reference inputs. Keep the image connected
+to the actual model workflow as required. This node supplies semantic role and preservation policy only.
+""".strip()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "Reference image to label for prompt planning. The tensor stays in the in-memory reference set so "
+                            "Prompt Director Auto can inspect it with the configured provider; runtime inspection and JSON "
+                            "outputs omit the tensor and expose only its role, label, description, and instructions."
+                        ),
+                    },
+                ),
+                "role": (
+                    ["identity", "wardrobe", "pose", "style", "object", "background"],
+                    {
+                        "default": "identity",
+                        "tooltip": (
+                            "The only purpose this reference may serve. Identity preserves who the subject is; wardrobe copies "
+                            "clothing; pose guides body position; style controls rendering treatment; object supplies product "
+                            "appearance; background supplies environment without inserting its people or unrelated objects."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "label": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Short human label such as face reference, black bikini reference, waterfall background, or product "
+                            "angle. The label appears in the compiled prompt and runtime inspection so users and Comfy MCP can "
+                            "identify which reference a recommendation concerns without exposing or serializing the image itself."
+                        ),
+                    },
+                ),
+                "description": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Optional trusted description of the relevant visible details. Leave blank to let Prompt Director "
+                            "Auto describe the reference with the configured vision provider. Describe only details relevant to "
+                            "the assigned role so unrelated scene content does not leak into the requested edit."
+                        ),
+                    },
+                ),
+                "instructions": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Optional hard instruction narrowing reference use, for example use only facial identity, copy only "
+                            "the bikini color and string construction, or borrow lighting style without copying composition. "
+                            "These instructions are compiled as reference constraints rather than general user intent."
+                        ),
+                    },
+                ),
+                "previous_references": (
+                    "PROMPT_DIRECTOR_REFERENCE_SET",
+                    {
+                        "tooltip": (
+                            "Optional reference set from another Prompt Director Reference node. Chain nodes to build multiple "
+                            "role-labeled references while preserving their order. Prompt Director Auto receives the final set "
+                            "as one input and can inspect every reference before compiling the edit plan."
+                        ),
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("PROMPT_DIRECTOR_REFERENCE_SET", "STRING")
+    RETURN_NAMES = ("references", "references_json")
+    OUTPUT_TOOLTIPS = (
+        "Typed in-memory reference set that can be chained into another Prompt Director Reference node or connected to Prompt Director and Prompt Director Auto. It carries image tensors for provider inspection plus explicit semantic roles and constraints.",
+        "JSON-safe reference summary for viewers and Comfy MCP. Image tensors are deliberately omitted; only role, label, trusted/provider description, and usage instructions are exposed for safe workflow inspection.",
+    )
+    FUNCTION = "run"
+    CATEGORY = "Prompt Director"
+
+    def run(self, image, role, label="", description="", instructions="", previous_references=None):
+        references = list((previous_references or {}).get("references", []))
+        references.append(
+            {
+                "image": image,
+                "role": role,
+                "label": label.strip() or f"{role} reference",
+                "description": description.strip(),
+                "instructions": instructions.strip(),
+            }
+        )
+        result = {"schema_version": "1.0", "references": references}
+        return (result, json.dumps(public_references(result), ensure_ascii=True))
+
+
+class PromptDirectorAuto:
+    DESCRIPTION = """
+Run the complete Prompt Director planning path in one node.
+
+Connect a source image, plain-language intent, optional mask, role-labeled references, Model Explorer context,
+and provider config. The node describes the source and any undescribed references, asks the provider for a
+structured edit plan, validates that plan against model and LoRA metadata, and deterministically compiles the
+exact final prompt. Provider prose never bypasses the compiler.
+
+The typed model context makes model_target = auto practical. Every loaded LoRA can contribute exact trigger
+tokens, compatibility facts, tested strength limits, negative tokens, and preservation guidance. A mask adds a
+strict outside-mask preservation rule. Reference roles prevent reference subjects from being inserted into the
+result. If provider analysis fails, the node still returns a deterministic prompt and visible warnings.
+
+Recommended wiring:
+Prompt Director Context.context -> Prompt Director Auto.context
+Prompt Director Reference.references -> Prompt Director Auto.reference_set
+source image and optional mask -> Prompt Director Auto
+Prompt Director Config.config -> Prompt Director Auto.config
+Prompt Director Auto.final_prompt -> text viewer -> actual model text encoder
+
+The runtime plan, resolved context, analysis, prompt, and warnings are recorded in Prompt Director's bounded
+local inspection registry. Comfy MCP can read that registry and the live wiring, explain whether the model and
+LoRAs are configured coherently, and propose a widget change without changing anything until the user agrees.
+
+What to verify:
+Keep final_prompt connected through a text viewer to the actual model encoder. Inspect context_json for the
+checkpoint family and every loaded LoRA, edit_plan_json for the exact change/preserve split, and analysis_json
+for image facts that should influence the edit. If the output ignores a LoRA, confirm its trigger appears in
+LORA ACTIVATION and that context warnings do not report incompatible family or out-of-range strength. If a
+reference person appears as an extra subject, inspect its assigned role and tighten that reference's instructions.
+""".strip()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_prompt": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "The user's authoritative intent in plain language. The provider may decompose it into structured "
+                            "changes and preservation constraints but may not replace the underlying request. The final prompt "
+                            "always preserves this intent and is compiled visibly for the actual model text encoder."
+                        ),
+                    },
+                ),
+                "model_target": (
+                    MODEL_TARGETS,
+                    {
+                        "default": "auto",
+                        "tooltip": (
+                            "Choose auto when context is connected so embedded Model Explorer metadata selects the compiler. "
+                            "Explicit values override metadata for controlled testing. The resolved target appears in both the "
+                            "edit plan and context JSON, making an incorrect family visible to users and Comfy MCP."
+                        ),
+                    },
+                ),
+                "mode": (
+                    ["edit", "generate", "video"],
+                    {
+                        "default": "edit",
+                        "tooltip": (
+                            "High-level operation used by the deterministic compiler. Edit emphasizes requested changes and "
+                            "preservation, generate describes a final image, and video adds motion and continuity policy. Keep "
+                            "this aligned with the actual downstream model path rather than the provider used for planning."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "image": ("IMAGE", {"tooltip": "Optional source image inspected by the configured vision provider. Its subject, identity, pose, scene, visible text, objects, and edit risks become structured source context that is compiled into the final prompt rather than merely displayed as warnings."}),
+                "mask": ("MASK", {"tooltip": "Optional edit mask summarized into the plan. It adds explicit masked-region scope and outside-mask preservation language; connect the same mask to the model's real inpaint/edit path because Prompt Director changes prompt policy, not pixels or sampler routing."}),
+                "reference_set": ("PROMPT_DIRECTOR_REFERENCE_SET", {"tooltip": "Optional chain of identity, wardrobe, pose, style, object, or background references. Undescribed references are inspected through the provider, then each role is compiled separately so unrelated subjects and scene details are not copied into the edit."}),
+                "context": ("PROMPT_DIRECTOR_CONTEXT", {"tooltip": "Typed Model Explorer context containing model_card, prompt_director, ModelSpec facts, the complete LoRA stack, actual strengths, compatibility results, triggers, and metadata warnings. This is the preferred source for automatic model-family selection and LoRA-aware planning."}),
+                "analysis_json": ("STRING", {"multiline": True, "default": "", "tooltip": "Optional manual structured analysis merged over provider analysis. Use this to correct subject count, identity, pose, scene, text, objects, or risks when a vision provider misses something. Invalid JSON never stops the graph; it produces a visible warning and preserves deterministic fallback behavior."}),
+                "global_rules": ("STRING", {"multiline": True, "default": "", "tooltip": "Reusable project constraints that the provider must treat as hard requirements and the deterministic compiler includes unchanged, such as no extra people, preserve identity, do not add readable text, or keep camera angle and background unless explicitly requested."}),
+                "config": ("PROMPT_DIRECTOR_CONFIG", {"tooltip": "Provider configuration for source/reference inspection and structured planning. API keys remain in the canonical ComfyUI user/__credentials/provider_profiles.json store. Without a provider, Auto still compiles a deterministic plan from visible text, context, references, and mask inputs."}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("final_prompt", "edit_plan_json", "context_json", "analysis_json", "warnings")
+    OUTPUT_TOOLTIPS = (
+        "Exact deterministic model-facing prompt. Route this through a visible text viewer to the actual encoder; it includes validated source context, preservation rules, assigned reference roles, mask scope, model policy, LoRA triggers, guidance, and avoid constraints.",
+        "Structured edit plan used to compile final_prompt. This is the primary audit contract for users and Comfy MCP: requested changes, preserve list, source context, references, mask, LoRA activation, model guidance, negative constraints, and warnings.",
+        "JSON-safe model_context.v1 payload used for this run, including target resolution evidence, embedded metadata, actual and recommended family-specific strengths, compatibility evidence, exact trigger tokens, and structured diagnostics, with image tensors and credentials omitted.",
+        "Normalized source-image analysis after provider and manual values are merged. It exposes subject, identity, pose, scene, visible text, objects, and risks that materially influenced the compiled edit plan.",
+        "JSON array of provider, metadata, compatibility, strength, analysis, and planning warnings. The graph remains runnable on recoverable failures, while this output and the MCP inspection endpoint make fallback behavior explicit.",
+    )
+    FUNCTION = "run"
+    CATEGORY = "Prompt Director"
+
+    def run(
+        self,
+        base_prompt,
+        model_target="auto",
+        mode="edit",
+        image=None,
+        mask=None,
+        reference_set=None,
+        context=None,
+        analysis_json="",
+        global_rules="",
+        config=None,
+        unique_id=None,
+    ):
+        provider_analysis = {}
+        provider_plan = {}
+        warnings = list((context or {}).get("warnings", []))
+        references = list((reference_set or {}).get("references", []))
+        provider = None
+        provider_public = {}
+
+        if _provider_enabled(config):
+            try:
+                provider = _configured_provider(config)
+                if config.get("debug"):
+                    provider_public = provider.public_config()
+                if image is not None:
+                    described = provider.describe_image(
+                        image_data_uri=image_to_png_data_uri(image),
+                        focus_prompt="Describe edit-sensitive identity, pose, clothing, scene, text, and objects.",
+                        detail_level="detailed",
+                    )
+                    provider_analysis = dict(described.get("analysis", {}) or {})
+                    if described.get("description") and not provider_analysis.get("scene_notes"):
+                        provider_analysis["scene_notes"] = str(described["description"])
+                    warnings.extend(described.get("warnings", []))
+                for reference in references:
+                    if reference.get("description") or reference.get("image") is None:
+                        continue
+                    described = provider.describe_image(
+                        image_data_uri=image_to_png_data_uri(reference["image"]),
+                        focus_prompt=f"Describe only details useful for this reference role: {reference.get('role', 'reference')}.",
+                        detail_level="prompt_ready",
+                    )
+                    reference["description"] = str(described.get("description", ""))
+                    warnings.extend(described.get("warnings", []))
+            except ProviderUnavailable as exc:
+                warnings.append(f"provider_unavailable:{exc}")
+                provider = None
+            except Exception as exc:
+                warnings.append(f"provider_error:{type(exc).__name__}:{exc}")
+                provider = None
+        elif config and image is not None:
+            warnings.append("provider_disabled:source_image_not_analyzed")
+
+        merged_analysis, merge_warnings = merge_analysis(analysis_json, provider_analysis)
+        warnings.extend(merge_warnings)
+        target = model_target if model_target != "auto" else str((context or {}).get("target_model") or "qwen_edit")
+        mask_info = mask_summary(mask)
+        public_refs = public_references({"references": references})
+
+        if provider is not None:
+            try:
+                provider_plan = provider.create_edit_plan(
+                    base_prompt=base_prompt,
+                    model_target=target,
+                    analysis=merged_analysis,
+                    model_context=public_context(context),
+                    references=public_refs,
+                    mask_info=mask_info,
+                    global_rules=global_rules,
+                )
+                warnings.extend(provider_plan.get("warnings", []))
+            except Exception as exc:
+                warnings.append(f"provider_plan_error:{type(exc).__name__}:{exc}")
+
+        result = build_prompt_director_result(
+            base_prompt=base_prompt,
+            model_target=target,
+            analysis_json=json.dumps(merged_analysis, ensure_ascii=True),
+            mode=mode,
+            global_rules=global_rules,
+            extra_warnings=warnings,
+            context=context or {},
+            references=public_refs,
+            mask_info=mask_info,
+            provider_plan=provider_plan,
+        )
+        context_public = public_context(context)
+        warnings_json = json.dumps(result.warnings, ensure_ascii=True)
+        record_inspection(
+            unique_id,
+            "prompt_director_auto",
+            {
+                "final_prompt": result.final_prompt,
+                "edit_plan": json.loads(result.edit_plan_json),
+                "context": context_public,
+                "analysis": json.loads(result.analysis_json),
+                "warnings": result.warnings,
+                "provider": provider_public,
+            },
+        )
+        return (
+            result.final_prompt,
+            result.edit_plan_json,
+            json.dumps(context_public, ensure_ascii=True),
+            result.analysis_json,
+            warnings_json,
+        )
+
+
+class PromptDirectorResultCritic:
+    DESCRIPTION = """
+Compare the source image and rendered result against the user's intent and structured edit plan.
+
+The configured vision provider receives both images in labeled order and returns a structured verdict, normalized
+0-to-1 scores, observations, requested changes met, preservation failures, unintended changes, LoRA activation
+notes, and a revised prompt when another attempt is warranted. It explicitly checks identity, pose, composition,
+background, extra people, accidental text or objects, and missing requested effects.
+
+This node does not rerun the graph automatically. It closes the quality loop while keeping the user in control:
+inspect critique_json, decide whether the observations are correct, then route revised_prompt into the next attempt
+or let Comfy MCP offer the corresponding widget change. Critic results are also available through Prompt Director's
+runtime inspection API so the agent can explain what failed without guessing from node wiring alone. critique_json
+implements critic_result.v1 and includes structured diagnostics alongside the legacy warning array.
+
+What to verify:
+A useful critique names concrete requested changes, preservation failures, and unintended changes visible in the
+two images. Treat not_run or provider warnings as no evidence. Do not accept a revision that changes the original
+intent merely to improve the score. When verdict and images disagree, keep the user's judgment authoritative and
+either refine the edit plan or switch the vision provider before attempting another render.
+""".strip()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_image": ("IMAGE", {"tooltip": "Original source image before editing. It is sent as the first labeled image so the critic can judge identity, pose, composition, lighting, background, text, objects, and all other content that should have remained unchanged according to the edit plan."}),
+                "result_image": ("IMAGE", {"tooltip": "Rendered edited result sent as the second labeled image. The critic compares it directly with the source and scores only the supplied user intent and edit plan, rather than rewarding unrelated aesthetic changes or inventing a new creative direction."}),
+                "user_intent": ("STRING", {"multiline": True, "default": "", "tooltip": "The original user request that defines success. Keep this identical to the intent used for Prompt Director Auto so the result check can separate requested changes from unintended drift and produce a revised prompt that remains faithful to the same goal."}),
+            },
+            "optional": {
+                "edit_plan_json": ("STRING", {"multiline": True, "default": "", "tooltip": "Structured edit plan produced by Prompt Director or Prompt Director Auto. It tells Prompt Director Result Critic exactly what should change, what must be preserved, how references may be used, what mask scope applies, and which LoRA effects or negative constraints should be visible."}),
+                "context": ("PROMPT_DIRECTOR_CONTEXT", {"tooltip": "Optional resolved Model Explorer and LoRA context. The critic uses model family, LoRA intent, triggers, compatibility, and metadata guidance to distinguish a missing LoRA effect from an impossible or incorrectly configured model combination."}),
+                "config": ("PROMPT_DIRECTOR_CONFIG", {"tooltip": "Required provider configuration for visual comparison. The node needs a vision-capable Grok, Kimi, GLM, Z.ai, or OpenAI-compatible model; credentials remain in the shared protected profile store and are never returned in critique output or runtime inspection."}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("critique_json", "revised_prompt", "warnings")
+    OUTPUT_TOOLTIPS = (
+        "Versioned critic_result.v1 comparison with verdict, bounded scores, observations, changes met, preservation failures, unintended changes, LoRA activation notes, revised prompt, legacy warnings, and structured diagnostics. Route to a viewer or inspect through Comfy MCP.",
+        "Provider-proposed next prompt when the result needs revision. It should preserve the original intent while directly addressing observed failures. Empty means the provider judged no prompt revision necessary; the user still decides whether to accept that judgment.",
+        "JSON array of provider setup, invalid plan/context, response-normalization, and execution warnings. A provider_required or provider_error warning means no reliable visual comparison was performed and the critique verdict should not be treated as evidence.",
+    )
+    FUNCTION = "run"
+    CATEGORY = "Prompt Director"
+
+    def run(
+        self,
+        source_image,
+        result_image,
+        user_intent,
+        edit_plan_json="",
+        context=None,
+        config=None,
+        unique_id=None,
+    ):
+        warnings = []
+        edit_plan, plan_warning = _parse_json_object_input(edit_plan_json, "edit_plan")
+        if plan_warning:
+            warnings.append(plan_warning)
+        try:
+            provider = _configured_provider(config)
+            critique = provider.critique_result(
+                source_image_data_uri=image_to_png_data_uri(source_image),
+                result_image_data_uri=image_to_png_data_uri(result_image),
+                user_intent=user_intent,
+                edit_plan=edit_plan,
+                model_context=public_context(context),
+            )
+            warnings.extend(critique.get("warnings", []))
+        except ProviderUnavailable as exc:
+            warnings.append(f"provider_unavailable:{exc}")
+            critique = _empty_critique()
+        except Exception as exc:
+            warnings.append(f"provider_error:{type(exc).__name__}:{exc}")
+            critique = _empty_critique()
+        critique["warnings"] = _dedupe_strings(list(critique.get("warnings", [])) + warnings)
+        critique["diagnostics"] = merge_diagnostics(
+            list(critique.get("diagnostics") or []),
+            diagnostics_from_warnings(critique["warnings"]),
+        )
+        record_inspection(
+            unique_id,
+            "prompt_director_result_critic",
+            {"user_intent": user_intent, "critique": critique, "context": public_context(context)},
+        )
+        return (
+            json.dumps(critique, ensure_ascii=True),
+            str(critique.get("revised_prompt", "")),
+            json.dumps(critique["warnings"], ensure_ascii=True),
         )
 
 
@@ -378,9 +993,10 @@ templates. The config output is a plain dictionary containing provider name, cre
 name, base URL, model, and debug preference only; it is designed to be safe to serialize.
 
 Debug:
-The debug flag is reserved for verbose provider diagnostics. Keep it off for normal graph execution. When
-debugging provider behavior, also route Prompt Director warnings and analysis_json into text viewers so you
-can distinguish provider setup problems from prompt-policy problems.
+The debug flag adds the provider's sanitized public configuration (provider, endpoint, model, timeout,
+authentication style, and static header names) to Prompt Director runtime inspection. It never includes an API
+key or header value. Keep it off for ordinary runs; turn it on when Comfy MCP needs to distinguish profile/model
+routing from prompt-policy problems, and still route warnings and analysis_json into viewers for local diagnosis.
 
 Recommended wiring:
 Prompt Director Config.config -> Prompt Director.config
@@ -459,9 +1075,9 @@ text or analysis from an old workflow branch.
                     {
                         "default": False,
                         "tooltip": (
-                            "Reserved flag for future verbose provider diagnostics. Leave it off for normal runs; "
-                            "when debugging, pair it with visible analysis_json and warnings outputs so provider "
-                            "setup issues are not confused with Qwen prompt-policy behavior."
+                            "Adds sanitized provider routing details to Prompt Director's runtime inspection registry: "
+                            "provider, endpoint, model, timeout, authentication style, and static header names. API keys "
+                            "and header values are never exposed. Leave off normally and enable for Comfy MCP diagnosis."
                         ),
                     },
                 ),
@@ -665,7 +1281,7 @@ the provider write a richer prompt, then lets Prompt Director apply repeatable m
                     },
                 ),
                 "model_target": (
-                    ["qwen_edit", "krea2", "ltx", "wan"],
+                    MODEL_TARGETS,
                     {
                         "default": "qwen_edit",
                         "tooltip": (
@@ -718,6 +1334,16 @@ the provider write a richer prompt, then lets Prompt Director apply repeatable m
                         ),
                     },
                 ),
+                "context": (
+                    "PROMPT_DIRECTOR_CONTEXT",
+                    {
+                        "tooltip": (
+                            "Optional Model Explorer context containing the actual model family and complete LoRA stack. "
+                            "When model_target is auto, the resolved family selects enhancement behavior; the provider also "
+                            "receives compatibility, strength, trigger, and preservation metadata instead of only a filename."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -739,16 +1365,20 @@ the provider write a richer prompt, then lets Prompt Director apply repeatable m
         lora_metadata_json="",
         global_rules="",
         config=None,
+        context=None,
     ):
         lora_metadata, warnings = parse_lora_metadata_json(lora_metadata_json)
+        target = model_target if model_target != "auto" else str((context or {}).get("target_model") or "qwen_edit")
+        warnings.extend((context or {}).get("warnings", []))
         try:
             provider = _configured_provider(config)
             result = provider.enhance_prompt(
                 base_prompt=base_prompt,
-                model_target=model_target,
+                model_target=target,
                 image_description=image_description,
                 lora_metadata=lora_metadata,
                 global_rules=global_rules,
+                model_context=public_context(context),
             )
             warnings.extend(result.get("warnings", []))
             return (
@@ -823,7 +1453,7 @@ visibility aid, not a replacement for model-aware prompt rewriting.
                     },
                 ),
                 "model_target": (
-                    ["qwen_edit", "krea2", "ltx", "wan"],
+                    MODEL_TARGETS,
                     {
                         "default": "qwen_edit",
                         "tooltip": (
@@ -885,6 +1515,16 @@ visibility aid, not a replacement for model-aware prompt rewriting.
                         ),
                     },
                 ),
+                "context": (
+                    "PROMPT_DIRECTOR_CONTEXT",
+                    {
+                        "tooltip": (
+                            "Optional typed details from Prompt Director Context. It contributes every loaded LoRA's embedded "
+                            "Model Explorer model_card and prompt_director metadata, actual strengths, compatibility decisions, "
+                            "and aggregate trigger tokens so Prompt Producer is no longer limited to one selected LoRA file."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -908,23 +1548,31 @@ visibility aid, not a replacement for model-aware prompt rewriting.
         image_description="",
         global_rules="",
         config=None,
+        context=None,
     ):
         lora_metadata, warnings = load_lora_prompt_metadata(lora_name, lora_metadata_json)
+        context_data = public_context(context)
+        warnings.extend((context or {}).get("warnings", []))
         trigger_tokens = [str(token) for token in lora_metadata.get("trigger_tokens", [])]
+        trigger_tokens.extend(str(token) for token in context_data.get("required_trigger_tokens", []))
+        trigger_tokens = _dedupe_strings(trigger_tokens)
+        target = model_target if model_target != "auto" else str(context_data.get("target_model") or "qwen_edit")
 
         try:
             provider = _configured_provider(config)
             result = provider.enhance_prompt(
                 base_prompt=base_prompt,
-                model_target=model_target,
+                model_target=target,
                 image_description=image_description,
                 lora_metadata=lora_metadata,
                 global_rules=global_rules,
+                model_context=context_data,
             )
             warnings.extend(result.get("warnings", []))
             keywords = result.get("lora_keywords", trigger_tokens) or trigger_tokens
+            enhanced = _fallback_lora_prompt(str(result.get("enhanced_prompt", base_prompt or "")), trigger_tokens)
             return (
-                str(result.get("enhanced_prompt", base_prompt or "")),
+                enhanced,
                 json.dumps(keywords, ensure_ascii=True),
                 json.dumps(lora_metadata, ensure_ascii=True),
                 json.dumps(warnings, ensure_ascii=True),
@@ -1057,6 +1705,42 @@ def _configured_provider(config):
     return get_provider(provider_name, config=config)
 
 
+def _provider_enabled(config) -> bool:
+    return bool(config and (config or {}).get("analysis_provider") not in {None, "", "none", "off", "disabled"})
+
+
+def _parse_json_object_input(raw: str, label: str) -> tuple[dict, str]:
+    if not raw or not raw.strip():
+        return {}, ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid_{label}_json:{exc.msg}"
+    if not isinstance(parsed, dict):
+        return {}, f"invalid_{label}_json:not_object"
+    return parsed, ""
+
+
+def _empty_critique() -> dict:
+    return {
+        "schema_version": "1.0",
+        "verdict": "not_run",
+        "scores": {},
+        "observations": [],
+        "requested_changes_met": [],
+        "preservation_failures": [],
+        "unintended_changes": [],
+        "lora_activation": [],
+        "revised_prompt": "",
+        "warnings": [],
+        "diagnostics": [],
+    }
+
+
+def _dedupe_strings(items) -> list[str]:
+    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+
+
 def _fallback_lora_prompt(base_prompt: str, trigger_tokens: list[str]) -> str:
     prompt = base_prompt.strip()
     missing = [token for token in trigger_tokens if token and token not in prompt]
@@ -1068,6 +1752,10 @@ def _fallback_lora_prompt(base_prompt: str, trigger_tokens: list[str]) -> str:
 
 NODE_CLASS_MAPPINGS = {
     "PromptDirector": PromptDirector,
+    "PromptDirectorContext": PromptDirectorContext,
+    "PromptDirectorReference": PromptDirectorReference,
+    "PromptDirectorAuto": PromptDirectorAuto,
+    "PromptDirectorResultCritic": PromptDirectorResultCritic,
     "PromptDirectorConfig": PromptDirectorConfig,
     "PromptDirectorImageDescribe": PromptDirectorImageDescribe,
     "PromptDirectorPromptEnhancer": PromptDirectorPromptEnhancer,
@@ -1077,6 +1765,10 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptDirector": "Prompt Director",
+    "PromptDirectorContext": "Prompt Director Context",
+    "PromptDirectorReference": "Prompt Director Reference",
+    "PromptDirectorAuto": "Prompt Director Auto",
+    "PromptDirectorResultCritic": "Prompt Director Result Critic",
     "PromptDirectorConfig": "Prompt Director Config",
     "PromptDirectorImageDescribe": "Prompt Image Describe",
     "PromptDirectorPromptEnhancer": "Prompt Enhancer",
@@ -1088,6 +1780,10 @@ __all__ = [
     "NODE_CLASS_MAPPINGS",
     "NODE_DISPLAY_NAME_MAPPINGS",
     "PromptDirector",
+    "PromptDirectorContext",
+    "PromptDirectorReference",
+    "PromptDirectorAuto",
+    "PromptDirectorResultCritic",
     "PromptDirectorConfig",
     "PromptDirectorImageDescribe",
     "PromptDirectorPromptEnhancer",

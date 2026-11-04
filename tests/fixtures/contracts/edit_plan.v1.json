@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "mode": "edit",
+  "target_model": "qwen_edit",
+  "original_intent": "make the jacket red",
+  "changes": ["Change the jacket to solid red."],
+  "preserve": ["Preserve identity, pose, lighting, and background."],
+  "source_context": {
+    "subject_count": 1,
+    "main_subject": "woman wearing a jacket"
+  },
+  "references": [
+    {
+      "role": "wardrobe",
+      "label": "red jacket reference"
+    }
+  ],
+  "mask": {
+    "provided": true,
+    "coverage_percent": 18.5
+  },
+  "lora_trigger_tokens": ["clownnose"],
+  "lora_guidance": [],
+  "model_guidance": [],
+  "negative_constraints": ["Do not add text or extra people."],
+  "global_rules": "Keep the original framing.",
+  "warnings": []
+}

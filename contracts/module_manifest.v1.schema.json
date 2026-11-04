@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/module_manifest.v1.schema.json",
+  "title": "Prompt Director Module Manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "module_id",
+    "module_version",
+    "contracts",
+    "node_types",
+    "capabilities",
+    "routes"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "module_id": { "type": "string", "minLength": 1 },
+    "module_version": { "type": "string", "minLength": 1 },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "node_types": { "type": "array", "items": { "type": "string" } },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "model_targets": { "type": "array", "items": { "type": "string" } },
+    "routes": { "type": "object", "additionalProperties": { "type": "string" } },
+    "behavior": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

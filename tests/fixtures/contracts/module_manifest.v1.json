@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "module_id": "comfyui-prompt-director",
+  "module_version": "0.3.0.dev0",
+  "contracts": {
+    "model_context.v1": "1.0",
+    "edit_plan.v1": "1.0",
+    "diagnostic.v1": "1.0",
+    "critic_result.v1": "1.0",
+    "prompt_director_inspection.v1": "1.0",
+    "module_manifest.v1": "1.0"
+  },
+  "node_types": ["PromptDirector", "PromptDirectorContext", "PromptDirectorAuto"],
+  "capabilities": ["deterministic_prompt_compilation", "runtime_inspection"],
+  "model_targets": ["auto", "qwen_edit"],
+  "routes": {
+    "manifest": "/prompt_director/v1/manifest",
+    "inspections": "/prompt_director/v1/inspections"
+  },
+  "behavior": {
+    "headless_execution": true,
+    "automatic_model_replacement": false
+  }
+}

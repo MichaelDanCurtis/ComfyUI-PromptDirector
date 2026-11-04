@@ -6,11 +6,16 @@ from urllib import request
 
 from ..analysis import parse_provider_analysis
 from ..provider_tasks import (
+    CRITIQUE_RESULT_SYSTEM_PROMPT,
     DESCRIBE_IMAGE_SYSTEM_PROMPT,
+    EDIT_PLAN_SYSTEM_PROMPT,
     ENHANCE_PROMPT_SYSTEM_PROMPT,
+    normalize_critique_response,
     normalize_description_response,
+    normalize_edit_plan_response,
     normalize_enhancement_response,
 )
+from ..request_auth import apply_provider_auth, sanitize_provider_error
 from .openai_compatible import ANALYSIS_SYSTEM_PROMPT
 
 
@@ -24,12 +29,16 @@ class XaiVisionProvider:
         model: str,
         http_post: Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]] | None = None,
         timeout: float = 60.0,
+        auth_style: str = "bearer",
+        extra_headers: dict[str, str] | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.http_post = http_post or _urllib_json_post
         self.timeout = timeout
+        self.auth_style = auth_style or "bearer"
+        self.extra_headers = dict(extra_headers or {})
 
     def public_config(self) -> dict[str, Any]:
         return {
@@ -37,13 +46,11 @@ class XaiVisionProvider:
             "base_url": self.base_url,
             "model": self.model,
             "timeout": self.timeout,
+            "auth_style": self.auth_style,
+            "header_names": sorted(self.extra_headers),
         }
 
     def analyze_image(self, image_data_uri: str, base_prompt: str, model_target: str) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -65,12 +72,7 @@ class XaiVisionProvider:
                 }
             ],
         }
-        response = self.http_post(
-            f"{self.base_url}/responses",
-            headers,
-            payload,
-            self.timeout,
-        )
+        response = self._post(payload)
         content = _extract_responses_text(response)
         return parse_provider_analysis(content)
 
@@ -101,12 +103,7 @@ class XaiVisionProvider:
                 }
             ],
         }
-        response = self.http_post(
-            f"{self.base_url}/responses",
-            self._headers(),
-            payload,
-            self.timeout,
-        )
+        response = self._post(payload)
         return normalize_description_response(_extract_responses_text(response))
 
     def enhance_prompt(
@@ -116,6 +113,7 @@ class XaiVisionProvider:
         image_description: str = "",
         lora_metadata: dict[str, Any] | None = None,
         global_rules: str = "",
+        model_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         context = {
             "base_prompt": base_prompt or "",
@@ -123,6 +121,7 @@ class XaiVisionProvider:
             "image_description": image_description or "",
             "global_rules": global_rules or "",
             "lora_metadata": lora_metadata or {},
+            "model_context": model_context or {},
         }
         payload = {
             "model": self.model,
@@ -138,19 +137,81 @@ class XaiVisionProvider:
                 }
             ],
         }
-        response = self.http_post(
-            f"{self.base_url}/responses",
-            self._headers(),
-            payload,
-            self.timeout,
-        )
+        response = self._post(payload)
         return normalize_enhancement_response(_extract_responses_text(response))
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
+    def create_edit_plan(
+        self,
+        base_prompt: str,
+        model_target: str,
+        analysis: dict[str, Any] | None = None,
+        model_context: dict[str, Any] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        mask_info: dict[str, Any] | None = None,
+        global_rules: str = "",
+    ) -> dict[str, Any]:
+        context = {
+            "base_prompt": base_prompt or "",
+            "model_target": model_target or "",
+            "analysis": analysis or {},
+            "model_context": model_context or {},
+            "references": references or [],
+            "mask_info": mask_info or {},
+            "global_rules": global_rules or "",
         }
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "store": False,
+            "instructions": EDIT_PLAN_SYSTEM_PROMPT,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": json.dumps(context, ensure_ascii=True)}]}],
+        }
+        return normalize_edit_plan_response(_extract_responses_text(self._post(payload)))
+
+    def critique_result(
+        self,
+        source_image_data_uri: str,
+        result_image_data_uri: str,
+        user_intent: str,
+        edit_plan: dict[str, Any] | None = None,
+        model_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        context = json.dumps(
+            {"user_intent": user_intent or "", "edit_plan": edit_plan or {}, "model_context": model_context or {}},
+            ensure_ascii=True,
+        )
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "store": False,
+            "instructions": CRITIQUE_RESULT_SYSTEM_PROMPT,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "SOURCE IMAGE"},
+                        {"type": "input_image", "image_url": source_image_data_uri},
+                        {"type": "input_text", "text": "EDITED RESULT"},
+                        {"type": "input_image", "image_url": result_image_data_uri},
+                        {"type": "input_text", "text": context},
+                    ],
+                }
+            ],
+        }
+        return normalize_critique_response(_extract_responses_text(self._post(payload)))
+
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url, headers = apply_provider_auth(
+            f"{self.base_url}/responses",
+            api_key=self.api_key,
+            auth_style=self.auth_style,
+            extra_headers=self.extra_headers,
+        )
+        try:
+            return self.http_post(url, headers, payload, self.timeout)
+        except Exception as exc:
+            secrets = [self.api_key, *self.extra_headers.values()]
+            raise RuntimeError(sanitize_provider_error(exc, secrets)) from exc
 
 
 def _extract_responses_text(response: dict[str, Any]) -> str:

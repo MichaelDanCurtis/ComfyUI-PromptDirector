@@ -8,6 +8,10 @@ class PromptPolicyTests(unittest.TestCase):
     def test_qwen_edit_adds_strict_editing_policy_and_analysis_warnings(self):
         analysis = {
             "subject_count": 2,
+            "main_subject": "woman in a red jacket",
+            "identity_notes": "same face, hair, and skin tone",
+            "pose_notes": "standing with hands at her sides",
+            "scene_notes": "softly lit studio wall",
             "visible_text": True,
             "objects_in_hands": ["phone"],
         }
@@ -23,10 +27,14 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("Create exactly one main person", result.final_prompt)
         self.assertIn("Use reference images as appearance guidance only", result.final_prompt)
         self.assertIn("Do not add extra people", result.final_prompt)
+        self.assertIn("same face, hair, and skin tone", result.final_prompt)
+        self.assertIn("standing with hands at her sides", result.final_prompt)
+        self.assertIn("softly lit studio wall", result.final_prompt)
         self.assertIn("extra_people", result.warnings)
         self.assertIn("text_artifacts", result.warnings)
         self.assertIn("object_in_hands", result.warnings)
         self.assertEqual(json.loads(result.analysis_json)["subject_count"], 2)
+        self.assertIn("changes", json.loads(result.edit_plan_json))
 
     def test_invalid_analysis_json_keeps_prompt_and_reports_warning(self):
         result = build_prompt_director_result(

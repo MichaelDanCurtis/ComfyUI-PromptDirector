@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/edit_plan.v1.schema.json",
+  "title": "Prompt Director Edit Plan v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode",
+    "target_model",
+    "original_intent",
+    "changes",
+    "preserve",
+    "references",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "mode": { "type": "string" },
+    "target_model": { "type": "string" },
+    "original_intent": { "type": "string" },
+    "changes": { "type": "array", "items": { "type": "string" } },
+    "preserve": { "type": "array", "items": { "type": "string" } },
+    "source_context": { "type": "object", "additionalProperties": true },
+    "references": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "mask": { "type": "object", "additionalProperties": true },
+    "lora_trigger_tokens": { "type": "array", "items": { "type": "string" } },
+    "lora_guidance": { "type": "array", "items": { "type": "string" } },
+    "model_guidance": { "type": "array", "items": { "type": "string" } },
+    "negative_constraints": { "type": "array", "items": { "type": "string" } },
+    "global_rules": { "type": "string" },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

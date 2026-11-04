@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/diagnostic.v1.schema.json",
+  "title": "Prompt Director Diagnostic v1",
+  "type": "object",
+  "required": ["schema_version", "code", "severity", "message", "advisory"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "code": { "type": "string", "minLength": 1 },
+    "severity": { "enum": ["info", "warning", "error"] },
+    "message": { "type": "string", "minLength": 1 },
+    "subject": { "type": "object", "additionalProperties": true },
+    "evidence": { "type": "object", "additionalProperties": true },
+    "advisory": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompt-director.local/contracts/model_context.v1.schema.json",
+  "title": "Prompt Director Model Context v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "target_model",
+    "model",
+    "loras",
+    "required_trigger_tokens",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1(?:\\.[0-9]+)*$" },
+    "target_model": { "type": "string", "minLength": 1 },
+    "target": {
+      "type": "object",
+      "properties": {
+        "requested": { "type": "string" },
+        "resolved": { "type": "string" },
+        "source": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "model": { "type": "object", "additionalProperties": true },
+    "loras": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "strength_model": { "type": "number" },
+          "strength_clip": { "type": "number" },
+          "compatibility": { "enum": ["compatible", "incompatible", "unknown"] },
+          "compatibility_detail": { "type": "object", "additionalProperties": true },
+          "strength_guidance": { "type": "object", "additionalProperties": true },
+          "trigger_tokens": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    },
+    "required_trigger_tokens": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "diagnostic.v1.schema.json" }
+    }
+  },
+  "additionalProperties": true
+}

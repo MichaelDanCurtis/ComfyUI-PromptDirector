@@ -2,6 +2,8 @@
 
 Version: 1.0
 
+Status: this document remains the detailed `prompt_director` namespace reference. The canonical cross-product contract is now the Safetensors Metadata Standard maintained by the shared `safetensors_metadata` library and ComfyUI Model Explorer. `model_card` owns general identity and compatibility; `prompt_director` owns activation and prompt behavior.
+
 Purpose: define safetensors metadata that lets Prompt Director / Prompt Producer and LoRA manager tools produce better prompts automatically.
 
 ## Storage

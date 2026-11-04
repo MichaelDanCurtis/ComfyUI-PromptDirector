@@ -8,7 +8,10 @@ from pathlib import Path
 from prompt_director.credentials import (
     CredentialUnavailable,
     default_credentials_path,
+    delete_provider_profile,
+    list_provider_profiles,
     load_provider_credentials,
+    save_provider_profile,
 )
 
 
@@ -54,6 +57,8 @@ class CredentialProfileTests(unittest.TestCase):
                                     "api_key": "local-secret",
                                     "base_url": "https://profile.example/v1",
                                     "model": "profile-model",
+                                    "auth_style": "header:X-API-Key",
+                                    "headers": {"X-Route": "vision"},
                                 }
                             }
                         }
@@ -71,6 +76,41 @@ class CredentialProfileTests(unittest.TestCase):
         self.assertEqual(credentials["api_key"], "local-secret")
         self.assertEqual(credentials["base_url"], "https://profile.example/v1")
         self.assertEqual(credentials["model"], "profile-model")
+        self.assertEqual(credentials["auth_style"], "header:X-API-Key")
+        self.assertEqual(credentials["headers"], {"X-Route": "vision"})
+
+    def test_shared_profile_writer_is_atomic_masked_and_preserves_existing_secret(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "provider_profiles.json"
+            save_provider_profile(
+                profile_name="default",
+                provider_name="kimi",
+                values={
+                    "api_key": "secret-one",
+                    "base_url": "https://api.example/v1",
+                    "model": "vision-one",
+                    "auth_style": "bearer",
+                },
+                credentials_path=path,
+            )
+            save_provider_profile(
+                profile_name="default",
+                provider_name="kimi",
+                values={"api_key": "", "model": "vision-two"},
+                credentials_path=path,
+            )
+
+            loaded = load_provider_credentials("kimi", credentials_path=path)
+            masked = list_provider_profiles(credentials_path=path)
+
+            self.assertEqual(loaded["api_key"], "secret-one")
+            self.assertEqual(loaded["model"], "vision-two")
+            self.assertTrue(masked["profiles"]["default"]["kimi"]["configured"])
+            self.assertNotIn("secret-one", json.dumps(masked))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+            delete_provider_profile("default", "kimi", credentials_path=path)
+            self.assertEqual(list_provider_profiles(credentials_path=path)["profiles"], {})
 
     def test_loads_credentials_from_legacy_prompt_director_path_when_shared_store_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

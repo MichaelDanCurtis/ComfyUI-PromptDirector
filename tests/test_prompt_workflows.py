@@ -2,7 +2,13 @@ import json
 import unittest
 from unittest.mock import patch
 
-from nodes import PromptDirectorImageDescribe, PromptDirectorPromptEnhancer, PromptProducer
+from nodes import (
+    PromptDirectorAuto,
+    PromptDirectorImageDescribe,
+    PromptDirectorPromptEnhancer,
+    PromptDirectorResultCritic,
+    PromptProducer,
+)
 
 
 class FakeProvider:
@@ -20,6 +26,7 @@ class FakeProvider:
         image_description="",
         lora_metadata=None,
         global_rules="",
+        model_context=None,
     ):
         keywords = (lora_metadata or {}).get("trigger_tokens", [])
         keyword_text = f" using {', '.join(keywords)}" if keywords else ""
@@ -30,6 +37,24 @@ class FakeProvider:
             ),
             "rationale": "Expanded the edit prompt for model adherence.",
             "lora_keywords": keywords,
+            "warnings": [],
+        }
+
+    def create_edit_plan(self, base_prompt, model_target, analysis=None, model_context=None, references=None, mask_info=None, global_rules=""):
+        return {
+            "changes": [f"Change only the requested attribute: {base_prompt}"],
+            "preserve": ["Preserve identity, pose, lighting, and background."],
+            "negative_constraints": ["no extra people", "no readable text"],
+            "warnings": [],
+        }
+
+    def critique_result(self, source_image_data_uri, result_image_data_uri, user_intent, edit_plan=None, model_context=None):
+        return {
+            "verdict": "needs_revision",
+            "scores": {"intent": 0.9, "preservation": 0.6, "identity": 0.7},
+            "observations": ["The jacket changed correctly but the background also changed."],
+            "unintended_changes": ["background"],
+            "revised_prompt": "Make the jacket red and preserve the background exactly.",
             "warnings": [],
         }
 
@@ -93,6 +118,57 @@ class PromptWorkflowNodeTests(unittest.TestCase):
         self.assertIn("clownnose", enhanced_prompt)
         self.assertEqual(json.loads(lora_keywords), ["clownnose"])
         self.assertEqual(json.loads(metadata_out)["trigger_tokens"], ["clownnose"])
+        self.assertEqual(json.loads(warnings), [])
+
+    def test_auto_node_builds_provider_plan_and_compiles_source_context(self):
+        node = PromptDirectorAuto()
+        context = {
+            "target_model": "qwen_edit",
+            "model": {"name": "qwen-2511.safetensors", "model_card": {"model_family": ["qwen_image_edit"]}},
+            "loras": [],
+            "warnings": [],
+        }
+
+        with (
+            patch("nodes.get_provider", return_value=FakeProvider()),
+            patch("nodes.image_to_png_data_uri", return_value="data:image/png;base64,abc"),
+        ):
+            final_prompt, edit_plan_json, context_json, analysis_json, warnings = node.run(
+                base_prompt="make the jacket red",
+                model_target="auto",
+                mode="edit",
+                image=object(),
+                context=context,
+                config={"analysis_provider": "grok"},
+                unique_id="91",
+            )
+
+        self.assertIn("make the jacket red", final_prompt)
+        self.assertIn("Woman with long reddish-brown hair", final_prompt)
+        self.assertEqual(json.loads(edit_plan_json)["target_model"], "qwen_edit")
+        self.assertEqual(json.loads(context_json)["model"]["name"], "qwen-2511.safetensors")
+        self.assertEqual(json.loads(analysis_json)["subject_count"], 1)
+        self.assertEqual(json.loads(warnings), [])
+
+    def test_result_critic_returns_structured_revision(self):
+        node = PromptDirectorResultCritic()
+
+        with (
+            patch("nodes.get_provider", return_value=FakeProvider()),
+            patch("nodes.image_to_png_data_uri", side_effect=["source-uri", "result-uri"]),
+        ):
+            critique_json, revised_prompt, warnings = node.run(
+                source_image=object(),
+                result_image=object(),
+                user_intent="make the jacket red",
+                config={"analysis_provider": "grok"},
+                unique_id="92",
+            )
+
+        critique = json.loads(critique_json)
+        self.assertEqual(critique["verdict"], "needs_revision")
+        self.assertIn("background", critique["unintended_changes"])
+        self.assertIn("preserve the background", revised_prompt.lower())
         self.assertEqual(json.loads(warnings), [])
 
 

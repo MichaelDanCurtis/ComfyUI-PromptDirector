@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "target_model": "qwen_edit",
+  "target": {
+    "requested": "auto",
+    "resolved": "qwen_edit",
+    "source": "model_card.model_family",
+    "confidence": 1.0,
+    "evidence": "qwen_image_edit"
+  },
+  "model": {
+    "category": "diffusion_models",
+    "name": "qwen_image_edit_2511.safetensors",
+    "model_card": {
+      "schema_version": "1.0",
+      "asset_type": "diffusion_model",
+      "model_family": ["qwen_image_edit"]
+    },
+    "prompt_director": {},
+    "modelspec": {}
+  },
+  "loras": [
+    {
+      "category": "loras",
+      "name": "clown_nose.safetensors",
+      "strength_model": 0.8,
+      "strength_clip": 0.7,
+      "compatibility": "compatible",
+      "compatibility_detail": {
+        "status": "compatible",
+        "reason": "explicit_family_match",
+        "evidence": ["qwen_image_edit"],
+        "target_model": "qwen_edit",
+        "advisory": true
+      },
+      "strength_guidance": {
+        "source": "model_card.family_weight_overrides.qwen_image_edit",
+        "default_strength_model": 0.8,
+        "default_strength_clip": 0.7
+      },
+      "trigger_tokens": ["clownnose"]
+    }
+  ],
+  "required_trigger_tokens": ["clownnose"],
+  "warnings": [],
+  "diagnostics": [],
+  "future_additive_field": {
+    "preserved": true
+  }
+}

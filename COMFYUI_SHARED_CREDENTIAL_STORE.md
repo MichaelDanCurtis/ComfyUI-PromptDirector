@@ -24,6 +24,15 @@ On disk, that resolves to:
 
 ComfyUI blocks `user/__*` system-user directories from the normal `/userdata` HTTP endpoints. This makes `user/__credentials` a better local target than `user/default` for secrets that should be server-side only.
 
+Prompt Director exposes a write-only `AI Credentials` sidebar backed by this exact path. Its local routes are:
+
+- `GET /prompt_director/credentials` — configured status and nonsecret routing fields only.
+- `POST /prompt_director/credentials` — atomically create or update one provider entry.
+- `DELETE /prompt_director/credentials` — remove one provider entry.
+- `POST /prompt_director/credentials/check` — verify that a named profile resolves without returning its secret.
+
+Writes use a same-directory temporary file, `fsync`, atomic replacement, directory mode `0700`, and file mode `0600`. Blank API-key submissions preserve an existing key so base URL/model changes do not require re-entering the secret.
+
 ## File Format
 
 ```json
@@ -79,6 +88,8 @@ Not every provider takes a plain `Authorization: Bearer <api_key>`. Two optional
   - `header:<Name>` → `<Name>: <api_key>` (arbitrary header)
   - `query:<param>` → appended as `?<param>=<api_key>`
 - **`headers`** — a map of *additional static headers* the endpoint requires beyond auth. Examples: Anthropic needs `anthropic-version`; Kimi/Moonshot and other OpenAI-compatible gateways may require a routing/version header.
+
+Prompt Director's provider runtime honors all four auth styles and static headers. Provider errors are sanitized against API-key and static-header values before they can appear in workflow warnings or inspection output.
 
 Known cases worth documenting (a consumer reads these from the file, never guesses):
 - **Anthropic API**: `auth_style: x-api-key`, `headers: { "anthropic-version": "2023-06-01" }`. **Do NOT** use Claude Code / Claude subscription OAuth credentials programmatically — those are off-limits to tools; only a user-supplied Anthropic **API key** may be used here.
